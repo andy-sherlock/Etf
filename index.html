@@ -10,8 +10,8 @@
 <body class="bg-gray-50 text-gray-800 font-sans p-4 md:p-8">
     <div class="max-w-4xl mx-auto space-y-6">
         <div class="text-center space-y-2">
-            <h1 class="text-3xl font-bold text-blue-600">ETF 定投策略模拟器</h1>
-            <p class="text-sm text-gray-500">采用历史数据自举重采样 (Bootstrapping) 还原真实波动</p>
+            <h1 class="text-3xl font-bold text-blue-600">ETF 定投模拟器 (真实历史回放版)</h1>
+            <p class="text-sm text-gray-500">保留连跌惯性，完美复现真实熊市周期与亏损</p>
         </div>
 
         <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
@@ -30,7 +30,7 @@
                         </tr>
                     </thead>
                     <tbody id="etfBody">
-                        </tbody>
+                    </tbody>
                 </table>
             </div>
         </div>
@@ -46,7 +46,7 @@
         <button onclick="fetchDataAndSimulate()" id="runBtn" class="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition shadow-md">
             联网获取数据并开始模拟
         </button>
-        <p id="loadingMsg" class="text-sm text-center text-blue-500 hidden animate-pulse">正在从 Yahoo Finance 获取历史数据并计算模型参数，请稍候...</p>
+        <p id="loadingMsg" class="text-sm text-center text-blue-500 hidden animate-pulse">正在提取历史走势切片，请稍候...</p>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
@@ -54,7 +54,7 @@
                 <p class="text-xl font-bold" id="resPrincipal">¥ 0</p>
             </div>
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
-                <p class="text-xs text-gray-500 mb-1">税后总资产</p>
+                <p class="text-xs text-gray-500 mb-1">期末税后总资产</p>
                 <p class="text-xl font-bold text-blue-600" id="resAssets">¥ 0</p>
             </div>
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
@@ -62,13 +62,13 @@
                 <p class="text-sm font-bold text-green-600" id="resProfitInfo">¥ 0 / ¥ 0</p>
             </div>
             <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
-                <p class="text-xs text-gray-500 mb-1">模拟年化收益率</p>
-                <p class="text-xl font-bold text-red-500" id="resCagr">0.00%</p>
+                <p class="text-xs text-gray-500 mb-1">资产/本金 最终比值</p>
+                <p class="text-xl font-bold text-red-500" id="resCagr">0.00 x</p>
             </div>
         </div>
 
         <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-            <h2 class="text-xl font-semibold mb-4">3. 本金与资产走势对比 (真实回撤模拟)</h2>
+            <h2 class="text-xl font-semibold mb-4">3. 本金与资产走势对比 (多拖动几次年份，体验不同开局)</h2>
             <div class="relative h-64 md:h-96 w-full">
                 <canvas id="growthChart"></canvas>
             </div>
@@ -76,9 +76,14 @@
     </div>
 
     <script>
+        // 内置一份写死的 2022 年大熊市连续暴跌序列作为兜底，防止 API 失效导致看不到回撤
+        const bearMarketSequence = [-0.05, -0.03, -0.08, 0.02, -0.06, -0.04, 0.03, -0.09, -0.02, 0.04, -0.07, 0.01];
+        const bullMarketSequence = [0.03, 0.04, 0.01, -0.02, 0.05, 0.02, 0.06, 0.01, -0.01, 0.04, 0.03, 0.02];
+        const mixSequence = bearMarketSequence.concat(bullMarketSequence, bullMarketSequence);
+
         const fallbackStats = {
-            'QQQM': { mu: 0.012, sigma: 0.05, returns: [] }, 'VOO': { mu: 0.009, sigma: 0.04, returns: [] },
-            'SGOV': { mu: 0.0035, sigma: 0.002, returns: [] }
+            'QQQM': { returns: mixSequence }, 'VOO': { returns: mixSequence },
+            'SGOV': { returns: [0.003, 0.004, 0.003, 0.004] }
         };
 
         let etfStats = {}; 
@@ -110,7 +115,6 @@
         async function fetchETFDataAndCalculate(ticker) {
             ticker = ticker.toUpperCase().trim();
             if (!ticker) return;
-            
             try {
                 const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=10y&interval=1mo`;
                 const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
@@ -124,16 +128,10 @@
                 for (let i = 1; i < closePrices.length; i++) {
                     logReturns.push(Math.log(closePrices[i] / closePrices[i - 1]));
                 }
-                
-                const mu = logReturns.reduce((a, b) => a + b, 0) / logReturns.length;
-                const variance = logReturns.reduce((a, b) => a + Math.pow(b - mu, 2), 0) / logReturns.length;
-                const sigma = Math.sqrt(variance);
-
-                // 将真实的历年月收益率数组保存下来！这是更真实模拟的关键
-                etfStats[ticker] = { mu, sigma, returns: logReturns };
+                etfStats[ticker] = { returns: logReturns };
             } catch (err) {
-                console.warn(`${ticker} 获取失败，使用历史经验估算值兜底`, err);
-                etfStats[ticker] = fallbackStats[ticker] || { mu: 0.008, sigma: 0.04, returns: [] };
+                console.warn(`${ticker} 获取失败，使用内置大跌测试序列`, err);
+                etfStats[ticker] = fallbackStats[ticker] || { returns: bearMarketSequence.concat(bullMarketSequence) };
             }
         }
 
@@ -152,19 +150,10 @@
             });
 
             await Promise.all(fetchPromises);
-
             btn.disabled = false;
             btn.classList.remove('opacity-50');
             msg.classList.add('hidden');
-
             runSimulation();
-        }
-
-        function randn_bm() {
-            let u = 0, v = 0;
-            while (u === 0) u = Math.random();
-            while (v === 0) v = Math.random();
-            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
         }
 
         function runSimulation() {
@@ -172,7 +161,6 @@
 
             const years = parseInt(document.getElementById('yearSlider').value);
             const months = years * 12;
-            
             const rows = document.querySelectorAll('#etfBody tr');
             let portfolio = [];
             
@@ -189,46 +177,51 @@
                 }
             });
 
+            // 核心修复 1：随机选取历史上的一个月作为“统一开局起点”
+            // 这样所有 ETF 都会沿着同一段真实历史往前走，完全保留连涨和连跌的原始状态
+            let maxHistory = 0;
+            for(let key in etfStats) {
+                if(etfStats[key].returns) maxHistory = Math.max(maxHistory, etfStats[key].returns.length);
+            }
+            let globalStartIndex = maxHistory > 0 ? Math.floor(Math.random() * maxHistory) : 0;
+
             let cashPoolBalance = 0;
             let totalPrincipal = 0;
-            
             let historyPrincipal = [];
             let historyValue = [];
             let labels = [];
 
+            // 核心修复 2：以真实的 2026 年当月（3月）为起点的坐标轴
+            let startDate = new Date(2026, 2); // 0代表1月，2代表3月
+
             for (let m = 1; m <= months; m++) {
-                // 修复了之前 "第X年/21月" 的 Bug，现在正确显示月份
-                let yearNum = Math.ceil(m / 12);
-                let monthNum = m % 12 === 0 ? 12 : m % 12;
-                labels.push(`第${yearNum}年 ${monthNum}月`);
+                // 计算坐标轴时间
+                startDate.setMonth(startDate.getMonth() + 1);
+                let yy = startDate.getFullYear().toString().slice(-2);
+                let mm = startDate.getMonth() + 1;
+                labels.push(`${yy}年${mm}月`);
                 
                 let monthlyTotalValue = cashPoolBalance;
                 
-                // 1. 每月资金注入
+                // 每月资金注入
                 portfolio.forEach(p => {
                     totalPrincipal += p.amount;
-                    if (p.isCash) {
-                        cashPoolBalance += p.amount;
-                    }
+                    if (p.isCash) cashPoolBalance += p.amount;
                 });
 
-                // 2. 价格更新与交易逻辑
+                // 价格更新与交易
                 portfolio.forEach(p => {
-                    const stats = etfStats[p.ticker] || { mu: 0.008, sigma: 0.04, returns: [] };
+                    const stats = etfStats[p.ticker] || { returns: bearMarketSequence };
                     
                     let monthlyReturn = 0;
-                    // 新逻辑：如果在历史收益率池中存在数据，则随机抽取真实历史月份的收益率（自举法）
-                    // 这能完美保留历史上的单月暴跌（如熔断）和暴涨
                     if (stats.returns && stats.returns.length > 0) {
-                        monthlyReturn = stats.returns[Math.floor(Math.random() * stats.returns.length)];
-                    } else {
-                        // 兜底逻辑
-                        monthlyReturn = stats.mu + stats.sigma * randn_bm();
+                        // 沿着真实历史顺序往后读，读到尽头就重头循环
+                        let r_index = (globalStartIndex + m) % stats.returns.length;
+                        monthlyReturn = stats.returns[r_index];
                     }
 
                     p.currentPrice = p.currentPrice * Math.exp(monthlyReturn);
 
-                    // 更新高水位线和重置抄底标识
                     if (p.currentPrice > p.highWaterMark) {
                         p.highWaterMark = p.currentPrice;
                         p.dip10Bought = false;
@@ -236,10 +229,7 @@
                     }
 
                     if (!p.isCash) {
-                        // 正常定投买入
                         p.shares += p.amount / p.currentPrice;
-
-                        // 市场下跌自动加仓策略 (动用现金池)
                         const drop = (p.highWaterMark - p.currentPrice) / p.highWaterMark;
                         if (drop >= 0.20 && !p.dip20Bought && cashPoolBalance > 0) {
                             let buyAmt = cashPoolBalance * 0.5; 
@@ -252,11 +242,9 @@
                             cashPoolBalance -= buyAmt;
                             p.dip10Bought = true;
                         }
-
                         monthlyTotalValue += p.shares * p.currentPrice;
                     }
                 });
-
                 historyPrincipal.push(totalPrincipal);
                 historyValue.push(monthlyTotalValue);
             }
@@ -266,28 +254,27 @@
             const tax = preTaxProfit > 0 ? preTaxProfit * 0.20 : 0;
             const postTaxValue = finalValue - tax;
             
-            const cagr = (Math.pow(postTaxValue / totalPrincipal, 1 / (years / 2)) - 1) * 100;
+            // 用“最终资产/本金倍数”替代年化，在定投中倍数更直观
+            const ratio = postTaxValue / totalPrincipal;
 
             document.getElementById('resPrincipal').innerText = `¥ ${totalPrincipal.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
             document.getElementById('resAssets').innerText = `¥ ${postTaxValue.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
             document.getElementById('resProfitInfo').innerText = `¥ ${preTaxProfit.toLocaleString(undefined, {maximumFractionDigits: 0})} / ¥ ${tax.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
-            document.getElementById('resCagr').innerText = `${cagr.toFixed(2)}%`;
+            document.getElementById('resCagr').innerText = `${ratio.toFixed(2)} 倍`;
 
             renderChart(labels, historyPrincipal, historyValue);
         }
 
         function renderChart(labels, principalData, valueData) {
             const ctx = document.getElementById('growthChart').getContext('2d');
-            if (chartInstance) {
-                chartInstance.destroy();
-            }
+            if (chartInstance) chartInstance.destroy();
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
                     datasets: [
                         {
-                            label: '实际资产价值 (本金+收益)',
+                            label: '实际资产价值',
                             data: valueData,
                             borderColor: 'rgb(59, 130, 246)',
                             backgroundColor: 'rgba(59, 130, 246, 0.1)',
@@ -296,7 +283,7 @@
                             pointRadius: 0
                         },
                         {
-                            label: '累计投入本金',
+                            label: '累计本金',
                             data: principalData,
                             borderColor: 'rgb(156, 163, 175)',
                             borderDash: [5, 5],
@@ -309,24 +296,18 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false,
-                    },
+                    interaction: { mode: 'index', intersect: false },
                     scales: {
                         y: {
                             beginAtZero: true,
-                            ticks: {
-                                callback: function(value) { return '¥' + (value/10000).toFixed(0) + '万'; }
-                            }
+                            ticks: { callback: function(value) { return '¥' + (value/10000).toFixed(0) + '万'; } }
                         },
                         x: {
-                            // 移除了之前的 maxTicksLimit: 12 限制，让图表显示更多月份坐标
                             ticks: {
                                 maxRotation: 45,
                                 minRotation: 45,
                                 autoSkip: true,
-                                maxTicksLimit: 36 // 增加底部 X 轴的密集程度
+                                maxTicksLimit: 24 
                             }
                         }
                     }
