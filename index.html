@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>美股 ETF 定投策略模拟器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans p-4 md:p-8">
+    <div class="max-w-4xl mx-auto space-y-6">
+        <div class="text-center space-y-2">
+            <h1 class="text-3xl font-bold text-blue-600">ETF 定投策略模拟器</h1>
+            <p class="text-sm text-gray-500">支持自由组合、现金池与跌幅自动加仓模拟</p>
+        </div>
+
+        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">1. ETF 资金配置 (每月)</h2>
+                <button onclick="addEtfRow()" class="text-sm bg-blue-100 text-blue-600 px-3 py-1 rounded hover:bg-blue-200">+ 添加 ETF</button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left" id="etfTable">
+                    <thead>
+                        <tr class="text-gray-500 text-sm border-b">
+                            <th class="pb-2">ETF 代码</th>
+                            <th class="pb-2">月投入 (元)</th>
+                            <th class="pb-2">是否现金池</th>
+                            <th class="pb-2 text-center">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="etfBody">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-xl font-semibold">2. 投资期限选择</h2>
+                <span class="text-lg font-bold text-blue-600" id="yearLabel">15 年</span>
+            </div>
+            <input type="range" id="yearSlider" min="1" max="30" value="15" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" oninput="updateYearLabel(); runSimulation();">
+        </div>
+
+        <button onclick="fetchDataAndSimulate()" id="runBtn" class="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition shadow-md">
+            联网获取数据并开始模拟
+        </button>
+        <p id="loadingMsg" class="text-sm text-center text-blue-500 hidden animate-pulse">正在从 Yahoo Finance 获取历史数据并计算模型参数，请稍候...</p>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
+                <p class="text-xs text-gray-500 mb-1">累计投入本金</p>
+                <p class="text-xl font-bold" id="resPrincipal">¥ 0</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
+                <p class="text-xs text-gray-500 mb-1">税后总资产</p>
+                <p class="text-xl font-bold text-blue-600" id="resAssets">¥ 0</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
+                <p class="text-xs text-gray-500 mb-1">税前总收益 / 预扣税(20%)</p>
+                <p class="text-sm font-bold text-green-600" id="resProfitInfo">¥ 0 / ¥ 0</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-center">
+                <p class="text-xs text-gray-500 mb-1">模拟年化收益率</p>
+                <p class="text-xl font-bold text-red-500" id="resCagr">0.00%</p>
+            </div>
+        </div>
+
+        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <h2 class="text-xl font-semibold mb-4">3. 本金与资产走势对比</h2>
+            <div class="relative h-64 md:h-96 w-full">
+                <canvas id="growthChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 预设 ETF 兜底数据（防止 CORS 代理失效导致页面无法使用）
+        const fallbackStats = {
+            'QQQM': { mu: 0.012, sigma: 0.05 }, 'VOO': { mu: 0.009, sigma: 0.04 },
+            'SPY': { mu: 0.009, sigma: 0.04 }, 'VTI': { mu: 0.0085, sigma: 0.045 },
+            'SMH': { mu: 0.018, sigma: 0.07 }, 'GLD': { mu: 0.005, sigma: 0.035 },
+            'SGOV': { mu: 0.0035, sigma: 0.002 }, 'SCHD': { mu: 0.008, sigma: 0.038 },
+            'IWM': { mu: 0.007, sigma: 0.055 }
+        };
+
+        let etfStats = {}; 
+        let chartInstance = null;
+
+        // 初始化默认列表
+        window.onload = () => {
+            addEtfRow('QQQM', 2000, false);
+            addEtfRow('VOO', 1000, false);
+            addEtfRow('SGOV', 2400, true);
+        };
+
+        function addEtfRow(ticker = '', amount = 1000, isCashPool = false) {
+            const tbody = document.getElementById('etfBody');
+            const tr = document.createElement('tr');
+            tr.className = "border-b border-gray-50";
+            tr.innerHTML = `
+                <td class="py-2 pr-2"><input type="text" value="${ticker}" placeholder="如 QQQM" class="w-full border rounded p-1 uppercase etf-ticker text-sm"></td>
+                <td class="py-2 pr-2"><input type="number" value="${amount}" min="0" step="100" class="w-full border rounded p-1 etf-amount text-sm"></td>
+                <td class="py-2 text-center"><input type="checkbox" class="etf-cashpool w-4 h-4 cursor-pointer" ${isCashPool ? 'checked' : ''}></td>
+                <td class="py-2 text-center"><button onclick="this.closest('tr').remove()" class="text-red-500 text-sm hover:underline">删除</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function updateYearLabel() {
+            document.getElementById('yearLabel').innerText = document.getElementById('yearSlider').value + ' 年';
+        }
+
+        // 联网获取数据计算 mu 和 sigma (使用公共 CORS 代理)
+        async function fetchETFDataAndCalculate(ticker) {
+            ticker = ticker.toUpperCase().trim();
+            if (!ticker) return;
+            
+            try {
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=10y&interval=1mo`;
+                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+                const response = await fetch(proxyUrl);
+                const data = await response.json();
+                
+                const closePrices = data.chart.result[0].indicators.quote[0].close.filter(p => p !== null);
+                if (closePrices.length < 2) throw new Error("数据不足");
+
+                let logReturns = [];
+                for (let i = 1; i < closePrices.length; i++) {
+                    logReturns.push(Math.log(closePrices[i] / closePrices[i - 1]));
+                }
+                
+                const mu = logReturns.reduce((a, b) => a + b, 0) / logReturns.length;
+                const variance = logReturns.reduce((a, b) => a + Math.pow(b - mu, 2), 0) / logReturns.length;
+                const sigma = Math.sqrt(variance);
+
+                etfStats[ticker] = { mu, sigma };
+            } catch (err) {
+                console.warn(`${ticker} 获取失败，使用历史经验估算值兜底`, err);
+                etfStats[ticker] = fallbackStats[ticker] || { mu: 0.008, sigma: 0.04 }; // 默认年化~10%
+            }
+        }
+
+        async function fetchDataAndSimulate() {
+            const btn = document.getElementById('runBtn');
+            const msg = document.getElementById('loadingMsg');
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+            msg.classList.remove('hidden');
+
+            const rows = document.querySelectorAll('#etfBody tr');
+            const fetchPromises = [];
+            rows.forEach(row => {
+                const ticker = row.querySelector('.etf-ticker').value;
+                if (!etfStats[ticker]) fetchPromises.push(fetchETFDataAndCalculate(ticker));
+            });
+
+            await Promise.all(fetchPromises);
+
+            btn.disabled = false;
+            btn.classList.remove('opacity-50');
+            msg.classList.add('hidden');
+
+            runSimulation();
+        }
+
+        // 标准正态分布随机数发生器 (Box-Muller)
+        function randn_bm() {
+            let u = 0, v = 0;
+            while (u === 0) u = Math.random();
+            while (v === 0) v = Math.random();
+            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        }
+
+        function runSimulation() {
+            if (Object.keys(etfStats).length === 0) return; // 还没获取数据
+
+            const years = parseInt(document.getElementById('yearSlider').value);
+            const months = years * 12;
+            
+            const rows = document.querySelectorAll('#etfBody tr');
+            let portfolio = [];
+            
+            rows.forEach(row => {
+                const ticker = row.querySelector('.etf-ticker').value.toUpperCase().trim();
+                const amount = parseFloat(row.querySelector('.etf-amount').value) || 0;
+                const isCash = row.querySelector('.etf-cashpool').checked;
+                if (ticker && amount > 0) {
+                    portfolio.push({ 
+                        ticker, amount, isCash, 
+                        shares: 0, currentPrice: 100, // 假设基准价100开始
+                        highWaterMark: 100, dip10Bought: false, dip20Bought: false 
+                    });
+                }
+            });
+
+            let cashPoolBalance = 0;
+            let totalPrincipal = 0;
+            
+            let historyPrincipal = [];
+            let historyValue = [];
+            let labels = [];
+
+            for (let m = 1; m <= months; m++) {
+                labels.push(`第 ${Math.ceil(m/12)} 年 / ${m} 月`);
+                let monthlyTotalValue = cashPoolBalance;
+                
+                // 1. 每月资金注入
+                portfolio.forEach(p => {
+                    totalPrincipal += p.amount;
+                    if (p.isCash) {
+                        cashPoolBalance += p.amount;
+                    }
+                });
+
+                // 2. 价格更新与交易逻辑
+                portfolio.forEach(p => {
+                    const stats = etfStats[p.ticker] || { mu: 0.008, sigma: 0.04 };
+                    
+                    // GBM 模型生成当月价格
+                    const drift = stats.mu - (stats.sigma * stats.sigma) / 2;
+                    const shock = stats.sigma * randn_bm();
+                    p.currentPrice = p.currentPrice * Math.exp(drift + shock);
+
+                    // 更新高水位线和重置抄底标识
+                    if (p.currentPrice > p.highWaterMark) {
+                        p.highWaterMark = p.currentPrice;
+                        p.dip10Bought = false;
+                        p.dip20Bought = false;
+                    }
+
+                    if (!p.isCash) {
+                        // 正常定投买入
+                        p.shares += p.amount / p.currentPrice;
+
+                        // 市场下跌自动加仓策略 (动用现金池)
+                        const drop = (p.highWaterMark - p.currentPrice) / p.highWaterMark;
+                        if (drop >= 0.20 && !p.dip20Bought && cashPoolBalance > 0) {
+                            let buyAmt = cashPoolBalance * 0.5; // 拿出剩余现金池的 50% 抄底 20% 跌幅
+                            p.shares += buyAmt / p.currentPrice;
+                            cashPoolBalance -= buyAmt;
+                            p.dip20Bought = true;
+                        } else if (drop >= 0.10 && !p.dip10Bought && cashPoolBalance > 0) {
+                            let buyAmt = cashPoolBalance * 0.3; // 拿出当前现金池的 30% 抄底 10% 跌幅
+                            p.shares += buyAmt / p.currentPrice;
+                            cashPoolBalance -= buyAmt;
+                            p.dip10Bought = true;
+                        }
+
+                        monthlyTotalValue += p.shares * p.currentPrice;
+                    }
+                });
+
+                historyPrincipal.push(totalPrincipal);
+                historyValue.push(monthlyTotalValue);
+            }
+
+            // 计算最终结果与税费
+            const finalValue = historyValue[historyValue.length - 1];
+            const preTaxProfit = finalValue - totalPrincipal;
+            const tax = preTaxProfit > 0 ? preTaxProfit * 0.20 : 0;
+            const postTaxValue = finalValue - tax;
+            
+            // 年化收益率计算公式： (期末/期初) ^ (1/年数) - 1
+            // 由于是定投，这里使用简化的近似 IRR 或直接展示绝对增值换算
+            const cagr = (Math.pow(postTaxValue / totalPrincipal, 1 / (years / 2)) - 1) * 100; // 资金平均沉淀时间为总时长的一半
+
+            // 更新 UI 界面数字
+            document.getElementById('resPrincipal').innerText = `¥ ${totalPrincipal.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+            document.getElementById('resAssets').innerText = `¥ ${postTaxValue.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+            document.getElementById('resProfitInfo').innerText = `¥ ${preTaxProfit.toLocaleString(undefined, {maximumFractionDigits: 0})} / ¥ ${tax.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+            document.getElementById('resCagr').innerText = `${cagr.toFixed(2)}%`;
+
+            renderChart(labels, historyPrincipal, historyValue);
+        }
+
+        function renderChart(labels, principalData, valueData) {
+            const ctx = document.getElementById('growthChart').getContext('2d');
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: '实际资产价值 (本金+收益)',
+                            data: valueData,
+                            borderColor: 'rgb(59, 130, 246)', // Tailwind blue-500
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.1,
+                            pointRadius: 0
+                        },
+                        {
+                            label: '累计投入本金',
+                            data: principalData,
+                            borderColor: 'rgb(156, 163, 175)', // Tailwind gray-400
+                            borderDash: [5, 5],
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                callback: function(value) { return '¥' + (value/10000).toFixed(0) + '万'; }
+                            }
+                        },
+                        x: {
+                            ticks: { maxTicksLimit: 12 }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
